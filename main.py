@@ -13,6 +13,8 @@ EPSILON = 1e-9          # 동점 판정 허용오차
 REPEAT = 10             # 성능 측정 반복 횟수
 LABEL_CROSS = "Cross"
 LABEL_X = "X"
+# 표준 라벨 목록. 새 라벨을 추가할 때는 여기와 _LABEL_MAP 두 곳만 수정한다(README "새 라벨 추가 절차").
+STANDARD_LABELS = (LABEL_CROSS, LABEL_X)
 UNDECIDED = "UNDECIDED"
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data.json")
 LINE = "#" + "-" * 40
@@ -65,7 +67,12 @@ class Matrix:
 # MAC 연산 (반복문 직접 구현)
 # ----------------------------------------------------------------------
 def mac(pattern, filt):
-    """위치별 곱의 총합. 크기가 다르면 ValueError."""
+    """위치별 곱의 총합(유사도 점수). 크기가 다르면 ValueError.
+
+    점수 해석: 패턴과 필터에서 '둘 다 값이 큰 칸'이 많을수록 곱이 커져 누적 점수가 커진다.
+    따라서 MAC 점수가 높을수록 그 필터(모양)와 더 유사하다고 본다.
+    예) 십자가 패턴 × 십자가 필터 = 5 (5칸 겹침), 십자가 패턴 × X 필터 = 1 (중심 1칸만 겹침)
+    """
     if pattern.n != filt.n:
         raise ValueError("크기 불일치: 패턴 %d×%d, 필터 %d×%d" % (pattern.n, pattern.n, filt.n, filt.n))
     n = pattern.n
@@ -87,13 +94,24 @@ def mac_flat(pattern_flat, filter_flat):
 # ----------------------------------------------------------------------
 # 판정 / 라벨 정규화
 # ----------------------------------------------------------------------
-def judge(score_a, score_b, label_a, label_b):
-    """epsilon 기반 비교. 동점이면 UNDECIDED."""
-    if abs(score_a - score_b) < EPSILON:
+def judge_scores(scores):
+    """scores: {라벨: 점수}. 점수가 가장 높은(=가장 유사한) 라벨을 반환.
+
+    1위와 2위의 차이가 EPSILON 미만이면 어느 쪽인지 결정할 수 없으므로 UNDECIDED.
+    라벨 수에 관계없이 동작하므로 새 라벨을 추가해도 수정할 필요가 없다.
+    """
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    if len(ranked) > 1 and abs(ranked[0][1] - ranked[1][1]) < EPSILON:
         return UNDECIDED
-    return label_a if score_a > score_b else label_b
+    return ranked[0][0]
 
 
+def judge(score_a, score_b, label_a, label_b):
+    """두 필터 비교(모드 1). 점수가 높은 쪽으로 판정, 동점이면 UNDECIDED."""
+    return judge_scores({label_a: score_a, label_b: score_b})
+
+
+# 입력 라벨(소문자) → 표준 라벨. expected 값과 filters 키 모두 이 표로 정규화한다.
 _LABEL_MAP = {
     "+": LABEL_CROSS, "cross": LABEL_CROSS,
     "x": LABEL_X,
@@ -227,7 +245,7 @@ FILTER_KEY = re.compile(r"^size_(\d+)$")
 
 
 def load_filters(raw_filters):
-    """{N: {Cross: Matrix, X: Matrix}} 반환. 문제 있는 필터는 메시지 출력 후 제외."""
+    """{N: {표준 라벨: Matrix}} 반환. STANDARD_LABELS가 모두 있어야 로드 성공, 아니면 메시지 출력 후 제외."""
     filters = {}
     if not isinstance(raw_filters, dict):
         print("✗ filters 항목이 객체가 아닙니다.")
@@ -257,11 +275,11 @@ def load_filters(raw_filters):
                 problems.append("%s: 크기 %d×%d (키는 %d×%d)" % (label, mat.n, mat.n, n, n))
                 continue
             loaded[label] = mat
-        if LABEL_CROSS in loaded and LABEL_X in loaded:
+        missing = [l for l in STANDARD_LABELS if l not in loaded]
+        if not missing:
             filters[n] = loaded
-            print("✓ %-7s 필터 로드 완료 (Cross, X)" % key)
+            print("✓ %-7s 필터 로드 완료 (%s)" % (key, ", ".join(STANDARD_LABELS)))
         else:
-            missing = [l for l in (LABEL_CROSS, LABEL_X) if l not in loaded]
             print("✗ %-7s 필터 로드 실패 (누락: %s) %s" % (key, ", ".join(missing), "; ".join(problems)))
     return filters
 
@@ -286,11 +304,12 @@ def analyze_case(key, case, filters):
     if pattern.n != n:
         return False, "크기 불일치: 키 size_%d, 패턴 %d×%d" % (n, pattern.n, pattern.n)
 
-    cross_score = mac(pattern, filters[n][LABEL_CROSS])
-    x_score = mac(pattern, filters[n][LABEL_X])
-    result = judge(cross_score, x_score, LABEL_CROSS, LABEL_X)
-    print("Cross 점수: %r" % cross_score)
-    print("X 점수: %r" % x_score)
+    # 표준 라벨마다 MAC 점수를 계산하고, 가장 높은(=가장 유사한) 라벨로 판정
+    scores = {}
+    for label in STANDARD_LABELS:
+        scores[label] = mac(pattern, filters[n][label])
+        print("%s 점수: %r" % (label, scores[label]))
+    result = judge_scores(scores)
     if result == expected:
         print("판정: %s | expected: %s | PASS" % (result, expected))
         return True, ""
